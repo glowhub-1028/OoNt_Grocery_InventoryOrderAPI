@@ -104,9 +104,9 @@ To avoid race conditions and inconsistent data, operations that update multiple 
 2. **Isolation** — Other connections do not see uncommitted changes until the transaction commits.
 3. **Prisma `$transaction`** — The transaction client (`tx`) is passed through, so all reads and writes use the same transaction.
 
-### Order creation (preventing overselling)
+### Order creation from cart (preventing overselling)
 
-Order creation is handled inside a database transaction. Stock updates and order creation occur atomically: if any product has insufficient stock, the entire transaction rolls back. This ensures consistency even when multiple order requests arrive simultaneously.
+`POST /orders` takes a `userId`, loads that user’s cart, and creates an order from all cart items inside a single transaction. For each cart item, stock is decremented using a conditional update (`updateMany` with `stock >= quantity`). If any product has insufficient stock, the entire transaction rolls back, no order is created, and the cart remains unchanged. This ensures consistency even when multiple order requests for the last item in stock happen at the same time.
 
 ### Example: order cancellation
 

@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { OrderStatus } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { CreateOrderDto } from './orders/dto/create-order.dto';
@@ -8,12 +12,25 @@ export class OrdersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createOrder(dto: CreateOrderDto) {
-    const { userId, items } = dto;
-
     return this.prisma.$transaction(async (tx) => {
-      const orderItemsData: { productId: string; quantity: number; price: number }[] = [];
+      const { userId } = dto;
 
-      for (const item of items) {
+      const cart = await tx.cart.findUnique({
+        where: { userId },
+        include: { items: true },
+      });
+
+      if (!cart || cart.items.length === 0) {
+        throw new BadRequestException('Cart is empty');
+      }
+
+      const orderItemsData: {
+        productId: string;
+        quantity: number;
+        price: number;
+      }[] = [];
+
+      for (const item of cart.items) {
         const product = await tx.product.findFirst({
           where: { id: item.productId, deletedAt: null },
         });
@@ -44,7 +61,7 @@ export class OrdersService {
         });
       }
 
-      return tx.order.create({
+      const order = await tx.order.create({
         data: {
           userId,
           status: OrderStatus.PENDING,
@@ -58,7 +75,26 @@ export class OrdersService {
         },
         include: { items: true },
       });
+
+      await tx.cartItem.deleteMany({
+        where: { cartId: cart.id },
+      });
+
+      return order;
     });
+  }
+
+  async getOrder(orderId: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    return order;
   }
 
   async cancelOrder(orderId: string) {

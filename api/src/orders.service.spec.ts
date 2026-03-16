@@ -56,26 +56,39 @@ describe('OrdersService', () => {
 
   describe('createOrder', () => {
     it('should create order when stock is sufficient', async () => {
+      const cartFindUnique = jest.fn().mockResolvedValue({
+        id: 'cart-id',
+        userId,
+        items: [{ productId, quantity: 2 }],
+      });
       const findFirst = jest.fn().mockResolvedValue(mockProduct);
       const updateMany = jest.fn().mockResolvedValue({ count: 1 });
       const orderCreate = jest.fn().mockResolvedValue(mockOrder);
+      const cartItemDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
 
-      prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-        const tx = {
-          product: { findFirst, updateMany },
-          order: { create: orderCreate },
-        };
-        return fn(tx);
-      });
+      prisma.$transaction.mockImplementation(
+        async (fn: (tx: unknown) => unknown) => {
+          const tx = {
+            cart: { findUnique: cartFindUnique },
+            cartItem: { deleteMany: cartItemDeleteMany },
+            product: { findFirst, updateMany },
+            order: { create: orderCreate },
+          };
+          return fn(tx);
+        },
+      );
 
       const dto: CreateOrderDto = {
         userId,
-        items: [{ productId, quantity: 2 }],
       };
 
       const result = await service.createOrder(dto);
 
       expect(result).toEqual(mockOrder);
+      expect(cartFindUnique).toHaveBeenCalledWith({
+        where: { userId },
+        include: { items: true },
+      });
       expect(findFirst).toHaveBeenCalledWith({
         where: { id: productId, deletedAt: null },
       });
@@ -93,23 +106,35 @@ describe('OrdersService', () => {
           include: { items: true },
         }),
       );
+      expect(cartItemDeleteMany).toHaveBeenCalledWith({
+        where: { cartId: 'cart-id' },
+      });
     });
 
     it('should fail order when stock insufficient', async () => {
-      prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-        const tx = {
-          product: {
-            findFirst: jest.fn().mockResolvedValue(mockProduct),
-            updateMany: jest.fn().mockResolvedValue({ count: 0 }),
-          },
-          order: { create: jest.fn() },
-        };
-        return fn(tx);
-      });
+      prisma.$transaction.mockImplementation(
+        async (fn: (tx: unknown) => unknown) => {
+          const tx = {
+            cart: {
+              findUnique: jest.fn().mockResolvedValue({
+                id: 'cart-id',
+                userId,
+                items: [{ productId, quantity: 999 }],
+              }),
+            },
+            cartItem: { deleteMany: jest.fn() },
+            product: {
+              findFirst: jest.fn().mockResolvedValue(mockProduct),
+              updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+            },
+            order: { create: jest.fn() },
+          };
+          return fn(tx);
+        },
+      );
 
       const dto: CreateOrderDto = {
         userId,
-        items: [{ productId, quantity: 999 }],
       };
 
       const err = await service.createOrder(dto).catch((e) => e);
@@ -118,20 +143,34 @@ describe('OrdersService', () => {
     });
 
     it('should throw NotFoundException when product does not exist', async () => {
-      prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-        const tx = {
-          product: {
-            findFirst: jest.fn().mockResolvedValue(null),
-            updateMany: jest.fn(),
-          },
-          order: { create: jest.fn() },
-        };
-        return fn(tx);
-      });
+      prisma.$transaction.mockImplementation(
+        async (fn: (tx: unknown) => unknown) => {
+          const tx = {
+            cart: {
+              findUnique: jest.fn().mockResolvedValue({
+                id: 'cart-id',
+                userId,
+                items: [
+                  {
+                    productId: '00000000-0000-0000-0000-000000000000',
+                    quantity: 1,
+                  },
+                ],
+              }),
+            },
+            cartItem: { deleteMany: jest.fn() },
+            product: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              updateMany: jest.fn(),
+            },
+            order: { create: jest.fn() },
+          };
+          return fn(tx);
+        },
+      );
 
       const dto: CreateOrderDto = {
         userId,
-        items: [{ productId: '00000000-0000-0000-0000-000000000000', quantity: 1 }],
       };
 
       const err = await service.createOrder(dto).catch((e) => e);
@@ -142,44 +181,51 @@ describe('OrdersService', () => {
     it('concurrent orders should not oversell stock', async () => {
       const stockMap: Record<string, number> = { [productId]: 1 };
 
-      prisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
-        const tx = {
-          product: {
-            findFirst: jest.fn().mockResolvedValue({ ...mockProduct, stock: 1 }),
-            updateMany: jest.fn().mockImplementation(
-              (args: {
-                where: { id: string; stock: { gte: number } };
-                data: { stock: { decrement: number } };
-              }) => {
-                const id = args.where.id;
-                const required = args.where.stock.gte;
-                const current = stockMap[id] ?? 0;
-                if (current >= required) {
-                  stockMap[id] = current - args.data.stock.decrement;
-                  return Promise.resolve({ count: 1 });
-                }
-                return Promise.resolve({ count: 0 });
-              },
-            ),
-          },
-          order: {
-            create: jest.fn().mockImplementation((args: { data: { userId: string } }) =>
-              Promise.resolve({
-                id: 'order-id',
-                userId: args.data.userId,
-                status: 'PENDING',
-                createdAt: new Date(),
-                items: [],
-              }),
-            ),
-          },
-        };
-        return fn(tx);
-      });
+      prisma.$transaction.mockImplementation(
+        async (fn: (tx: unknown) => unknown) => {
+          const tx = {
+            cart: {
+              findUnique: jest
+                .fn()
+                .mockResolvedValue({ id: 'cart-id', userId, items: [{ productId, quantity: 1 }] }),
+            },
+            cartItem: { deleteMany: jest.fn() },
+            product: {
+              findFirst: jest.fn().mockResolvedValue({ ...mockProduct, stock: 1 }),
+              updateMany: jest.fn().mockImplementation(
+                (args: {
+                  where: { id: string; stock: { gte: number } };
+                  data: { stock: { decrement: number } };
+                }) => {
+                  const id = args.where.id;
+                  const required = args.where.stock.gte;
+                  const current = stockMap[id] ?? 0;
+                  if (current >= required) {
+                    stockMap[id] = current - args.data.stock.decrement;
+                    return Promise.resolve({ count: 1 });
+                  }
+                  return Promise.resolve({ count: 0 });
+                },
+              ),
+            },
+            order: {
+              create: jest.fn().mockImplementation((args: { data: { userId: string } }) =>
+                Promise.resolve({
+                  id: 'order-id',
+                  userId: args.data.userId,
+                  status: 'PENDING',
+                  createdAt: new Date(),
+                  items: [],
+                }),
+              ),
+            },
+          };
+          return fn(tx);
+        },
+      );
 
       const dto: CreateOrderDto = {
         userId,
-        items: [{ productId, quantity: 1 }],
       };
 
       const [result1, result2] = await Promise.allSettled([
